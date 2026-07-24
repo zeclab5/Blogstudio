@@ -1,0 +1,40 @@
+# ── Blogstudio 저장소: blog_studio/ + publisher/ 코드만 추적 ──────────────
+# C:\blogger 안의 다른 무관한 프로젝트(photo assets, video, ai_video 등)는
+# 이 저장소와 무관하므로 기본적으로 전부 제외하고, 두 폴더만 허용한다.
+/*
+!/blog_studio/
+!/publisher/
+!/.gitignore
+!/README.md
+
+# ── publisher: OAuth 인증정보·토큰·브라우저 로그인 세션(절대 커밋 금지) ──
+publisher/client_secrets.json
+publisher/client_secrets.json.old_bak
+publisher/client_secrets_sheets.json
+publisher/token.json
+publisher/browser_profile/
+publisher/blog_id.txt
+publisher/__pycache__/
+publisher/post_config.json
+publisher/post_en.html
+publisher/post_ko.html
+publisher/publish_log.txt
+
+# ── blog_studio: 사용자 데이터·캐시·브라우저 세션·DB(컴퓨터마다 로컬로 생성) ──
+blog_studio/__pycache__/
+blog_studio/_json_debug/
+blog_studio/generated/
+blog_studio/profiles/
+blog_studio/stock_profile/
+blog_studio/stock_form_dumps/
+blog_studio/tools/
+blog_studio/events.db
+blog_studio/photo_library.db
+blog_studio/blogs.json
+blog_studio/schedule.json
+
+# ── 공통 ──
+*.pyc
+__pycache__/
+.DS_Store
+Thumbs.db
