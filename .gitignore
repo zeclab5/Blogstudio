@@ -5,6 +5,7 @@
 !/blog_studio/
 !/publisher/
 !/.gitignore
+!/.gitattributes
 !/README.md
 
 # ── publisher: OAuth 인증정보·토큰·브라우저 로그인 세션(절대 커밋 금지) ──

@@ -1,0 +1,6 @@
+# 윈도우·맥을 오가며 개발하므로 줄바꿈을 텍스트 파일 기준으로 정규화(체크아웃 시 각 OS 기본값 사용)
+* text=auto
+*.py text
+*.md text
+*.command text eol=lf
+*.bat text eol=crlf
