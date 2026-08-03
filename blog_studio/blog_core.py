@@ -998,7 +998,13 @@ def _ollama_generate(settings: dict, prompt: str, log=print, system: str = GEN_S
 
 
 def ensure_ollama_running(settings: dict, log=print) -> bool:
-    """Ollama 서버가 떠 있는지 확인하고, 없으면 'ollama serve'를 띄웁니다."""
+    """Ollama 서버가 떠 있는지 확인하고, 없으면 'ollama serve'를 띄웁니다.
+    ★윈도우는 Ollama가 로그인 시 트레이 앱으로 자동 실행되도록 등록돼 있는 경우가 많아,
+    이른 아침 예약발행처럼 로그인 직후 이 함수가 호출되면 '트레이 앱이 막 서버를 띄우는
+    시점'과 '이 함수가 자체적으로 ollama serve를 띄우는 시점'이 겹쳐 포트 바인딩 경합
+    (WSAEACCES: bind 접근 거부)이 날 수 있다. 이 경우 우리가 띄운 프로세스는 죽지만
+    트레이 앱 쪽 서버는 계속 초기화 중일 뿐이므로, 실패로 단정 짓지 말고 더 기다린다
+    (2026-08-03 — stderr를 버리지 않고 남겨 다음에 원인이 바로 보이게 함)."""
     base = settings["ollama_url"].rstrip("/")
     try:
         urllib.request.urlopen(base + "/api/tags", timeout=3)
@@ -1006,25 +1012,40 @@ def ensure_ollama_running(settings: dict, log=print) -> bool:
     except Exception:
         pass
     log("   ⏳ Ollama 서버 시작 중...")
+    proc = None
     try:
         creationflags = 0x08000000 if os.name == "nt" else 0  # CREATE_NO_WINDOW
-        subprocess.Popen(
+        proc = subprocess.Popen(
             ["ollama", "serve"],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True,
             creationflags=creationflags,
         )
     except FileNotFoundError:
         log("   ❌ ollama 명령을 찾을 수 없습니다. Ollama가 설치돼 있는지 확인하세요.")
         return False
-    for _ in range(30):
+    # 최대 90초 대기(첫 부팅 GPU 초기화·경합 상황 감안 — 예전 30초는 로그인 직후 트레이 앱과
+    # 겹칠 때 부족했음). 우리가 띄운 프로세스가 일찍 죽어도(바인딩 경합 등) 다른 인스턴스가
+    # 뜨는 중일 수 있으니 계속 폴링한다.
+    for i in range(90):
         time.sleep(1)
         try:
             urllib.request.urlopen(base + "/api/tags", timeout=3)
-            log("   ✅ Ollama 서버 준비 완료")
+            log(f"   ✅ Ollama 서버 준비 완료 ({i + 1}초)")
             return True
         except Exception:
-            continue
-    log("   ❌ Ollama 서버가 시작되지 않았습니다.")
+            pass
+        if proc is not None and proc.poll() is not None and i < 3:
+            # 우리가 띄운 프로세스가 곧바로 종료됨 — 왜 죽었는지 한 번만 로그에 남김
+            err = ""
+            try:
+                err = (proc.stderr.read() or "").strip()[-200:]
+            except Exception:
+                pass
+            if err:
+                log(f"   ⚠️ 우리가 띄운 Ollama 프로세스 종료(다른 인스턴스가 시작 중일 수 있음): {err}")
+            proc = None   # 반복 로그 방지
+    log("   ❌ Ollama 서버가 90초 안에 준비되지 않았습니다. "
+        "작업 표시줄에서 Ollama 아이콘이 있는지, 수동으로 실행되는지 확인해 보세요.")
     return False
 
 
