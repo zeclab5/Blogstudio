@@ -38,18 +38,59 @@ IMGBB_KEY_FILE = SCRIPT_DIR / "imgbb_key.txt"   # https://api.imgbb.com/ 에서 
 
 # ── Google 인증 ───────────────────────────────────────────────────────────────
 
+# 자동 발행 스케줄러가 백그라운드에서 잠깐 False로 바꿔, 로그인이 만료됐을 때
+# 아무도 안 보는 상태에서 브라우저 로그인 창이 뜬 채 무한 대기하는 사고를 막는다
+# (2026-08-03). 수동으로 발행 버튼을 누르는 경우(사용자가 화면 앞에 있음)는 그대로
+# True로 둬 기존처럼 필요하면 브라우저가 자동으로 뜬다.
+ALLOW_INTERACTIVE_AUTH = True
+
+
+class AuthExpiredError(RuntimeError):
+    """저장된 Google 리프레시 토큰이 만료·취소됨(invalid_grant). 재로그인이 필요하다.
+    자동 발행 중(ALLOW_INTERACTIVE_AUTH=False)에는 브라우저를 띄우지 않고 이 예외만
+    던지므로, 호출부가 그 블로그를 건너뛰고 사용자가 수동으로 재로그인하도록 안내한다."""
+    pass
+
+
+def is_auth_error(e) -> bool:
+    return isinstance(e, AuthExpiredError)
+
+
 def get_credentials():
     from google.oauth2.credentials import Credentials
     from google_auth_oauthlib.flow import InstalledAppFlow
     from google.auth.transport.requests import Request
+    from google.auth.exceptions import RefreshError
 
     creds = None
     if TOKEN_FILE.exists():
         creds = Credentials.from_authorized_user_file(str(TOKEN_FILE), SCOPES)
     if not creds or not creds.valid:
         if creds and creds.expired and creds.refresh_token:
-            creds.refresh(Request())
-        else:
+            try:
+                creds.refresh(Request())
+            except RefreshError as e:
+                # 리프레시 토큰 자체가 죽었음(취소/만료) — 재시도해도 계속 실패하므로
+                # 깨진 토큰 파일을 지워 다음 시도가 깨끗하게 재로그인으로 가게 한다.
+                print(f"   ⚠️  저장된 로그인이 만료됐습니다({TOKEN_FILE.name}) — 재로그인 필요")
+                try:
+                    TOKEN_FILE.unlink()
+                except Exception:
+                    pass
+                if not ALLOW_INTERACTIVE_AUTH:
+                    raise AuthExpiredError(
+                        f"{TOKEN_FILE}: 로그인 만료(invalid_grant) — 자동 발행 중엔 "
+                        f"로그인창을 띄우지 않습니다. 프로그램에서 [🚀 2. 생성된 글 발행]을 "
+                        f"한 번 눌러 브라우저로 다시 로그인해 주세요."
+                    ) from e
+                creds = None   # 아래에서 새로 로그인
+        if creds is None:
+            if not ALLOW_INTERACTIVE_AUTH:
+                raise AuthExpiredError(
+                    f"{TOKEN_FILE}: 로그인 정보 없음 — 자동 발행 중엔 로그인창을 띄우지 "
+                    f"않습니다. 프로그램에서 [🚀 2. 생성된 글 발행]을 한 번 눌러 "
+                    f"브라우저로 로그인해 주세요."
+                )
             if not SECRETS_FILE.exists():
                 print(f"❌ {SECRETS_FILE.name} 없음.")
                 sys.exit(1)

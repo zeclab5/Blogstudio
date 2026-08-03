@@ -4929,10 +4929,38 @@ class BlogStudio:
             f"   ※ 쓰기 할당량은 보통 태평양 자정(한국시간 오후 4시경)에 리셋됩니다.\n")
         return True
 
+    AUTH_COOLDOWN_SEC = 3600   # 특정 블로그의 로그인이 만료됐을 때 그 블로그만 쉬게 할 시간(1시간).
+    # 리프레시 토큰이 죽은 건 자동으로 못 고침(사람이 브라우저로 로그인해야 함) — 30초마다
+    # 계속 재시도해봐야 소용없고, 다른(정상) 블로그의 차례까지 막으면 안 되므로 이 블로그만 쉬게 함.
+
+    def _handle_auth_error(self, ex, bid: str = "", where: str = "") -> bool:
+        """예외가 Google 로그인 만료(invalid_grant)면 그 블로그만 쿨다운시키고 안내 후 True.
+        아니면 False. 자동 발행 중엔 브라우저 로그인창을 못 띄우므로(무인 상태), 사람이
+        [🚀 2. 생성된 글 발행]을 수동으로 눌러 재로그인해야 풀린다."""
+        try:
+            import publish_today as pub
+            if not pub.is_auth_error(ex):
+                return False
+        except Exception:
+            return False
+        if not hasattr(self, "_auth_block_until"):
+            self._auth_block_until = {}
+        self._auth_block_until[bid] = time.time() + self.AUTH_COOLDOWN_SEC
+        name = self._blog_name(bid) if bid else ""
+        mins = self.AUTH_COOLDOWN_SEC // 60
+        self.log_q.put(
+            f"\n🔑 Google 로그인 만료{(' — ' + where) if where else ''}{(' [' + name + ']') if name else ''}\n"
+            f"   저장된 로그인이 취소·만료됐습니다(invalid_grant). 자동으로는 재로그인할 수 없어\n"
+            f"   이 블로그의 자동 발행을 {mins}분간 건너뜁니다(다른 블로그는 정상 진행).\n"
+            f"   → 지금 바로 고치려면: 이 블로그로 전환 후 [🚀 2. 생성된 글 발행]을 한 번 눌러\n"
+            f"     브라우저 로그인창에서 다시 로그인해 주세요.\n")
+        return True
+
     def _tick_scheduler(self):
         """자동 발행: 등록된 '모든' 블로그를 훑어 시각이 지난 미발행 항목을 발행.
         Blogger 쓰기 할당량(429)이 소진되면 재시도해도 계속 실패하므로, 일정 시간 자동 발행을
-        멈췄다가(쿨다운) 자동으로 다시 시도한다(2026-07-14)."""
+        멈췄다가(쿨다운) 자동으로 다시 시도한다(2026-07-14). 특정 블로그의 Google 로그인이
+        만료됐으면(invalid_grant) 그 블로그만 건너뛰고 다른 블로그는 정상 진행한다(2026-08-03)."""
         try:
             blocked_until = getattr(self, "_quota_block_until", 0)
             if time.time() < blocked_until:
@@ -4940,11 +4968,16 @@ class BlogStudio:
             elif self.data["settings"].get("auto_publish", True) and not self.busy:
                 due = core.scan_all_due()                 # 활성 블로그가 바뀜
                 core.set_active_blog(self.active_blog)    # UI용으로 복구
+                auth_blocked = getattr(self, "_auth_block_until", {})
+                now = time.time()
+                due = [d for d in due if now >= auth_blocked.get(d[0], 0)]
                 if due:
                     bid, ds = due[0]
                     self._log(f"\n⏰ 자동 발행: [{self._blog_name(bid)}] {ds}\n")
 
                     def job(bid=bid, ds=ds):
+                        import publish_today as pub
+                        pub.ALLOW_INTERACTIVE_AUTH = False   # 무인 상태 — 브라우저 로그인창 금지
                         try:
                             try:
                                 core.set_active_blog(bid)
@@ -4955,9 +4988,13 @@ class BlogStudio:
                             finally:
                                 core.set_active_blog(self.active_blog)
                         except Exception as ex:
+                            if self._handle_auth_error(ex, bid, f"[자동] {ds}"):
+                                return                # 로그인 만료 — 이 블로그만 쿨다운
                             if self._handle_quota_error(ex, f"[자동] {ds}"):
                                 return                # 할당량 소진 — 조용히 종료(재시도 안 함)
                             raise
+                        finally:
+                            pub.ALLOW_INTERACTIVE_AUTH = True   # 수동 작업은 원래대로 자동 로그인 허용
                     self._start_worker(job, f"[자동] {self._blog_name(bid)} · {ds}")
         except Exception as e:
             try:
