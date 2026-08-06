@@ -86,11 +86,63 @@ def _korea_score(item: dict, query: str = "") -> int:
     for kw in _query_keywords(query):                 # 소주제 핵심어와 실제 일치하는지
         if kw in text:
             score += 6
+    # 정식 명칭으로 찾아온 유물('도자기'로 검색했는데 제목은 '백자 항아리')도 일치로 인정.
+    # 이게 없으면 정작 정확한 유물 사진이 0점이라 뒤로 밀린다(2026-08-07).
+    for alt in archive_synonyms(query):
+        if alt.lower() in text:
+            score += 6
+            break
     if item.get("source") in ("한국관광공사", "국가유산청", "공유마당(공공누리)"):
         score += 8              # 한국 정부기관 자체 API — 동률 시 타이브레이커
     elif item.get("source") in ("Unsplash", "Pexels"):
         score += 3              # 고화질 스톡 사진 — 동률 시 약한 가산
     return score
+
+
+# 관광공사 결과가 '장소'임을 드러내는 말 — 이런 게 제목에 있으면 실물 작품이 아니라
+# 그 작품을 전시·판매·체험하는 '건물/가게/행사'다(민화박물관, 한복대여점, 도자기축제 …).
+_PLACE_WORDS = ("박물관", "미술관", "전시관", "기념관", "체험관", "마을", "축제", "거리",
+                "시장", "상가", "매장", "공방", "카페", "센터", "공원", "학교", "대여",
+                "museum", "gallery", "festival", "market", "shop", "center", "village")
+
+
+# 유물 아카이브(공유마당·국가유산청)는 정식 명칭으로 등록돼 있어, 일상어로 검색하면
+# 0건이 나오고 결국 관광공사의 상호·건물 사진만 남는다(실측: '도자기'→0건이지만
+# '백자'→국보 항아리 3건, '청자'→국보 향로 3건). 그래서 일상어를 정식 명칭으로 넓혀 함께
+# 조회한다. 값은 '그 말로 검색하면 실제 유물이 나오는지' 실측해 고른 것만 넣었다(2026-08-07).
+_ARCHIVE_SYNONYMS = {
+    "도자기": ["백자", "청자", "분청사기"],
+    "도예": ["백자", "청자", "분청사기"],
+    "자기": ["백자", "청자"],
+    "한복": ["저고리", "당의", "원삼"],
+    "전통 의복": ["저고리", "당의", "원삼"],
+    "그릇": ["백자", "청자", "분청사기"],
+}
+
+
+def archive_synonyms(query: str) -> list:
+    """유물 아카이브용 대체 검색어(없으면 빈 목록)."""
+    q = (query or "").strip()
+    if q in _ARCHIVE_SYNONYMS:
+        return _ARCHIVE_SYNONYMS[q]
+    for k, v in _ARCHIVE_SYNONYMS.items():      # '한복 입기'처럼 말이 붙은 경우도 인식
+        if k in q:
+            return v
+    return []
+
+
+def _source_bonus(item: dict, query: str = "") -> int:
+    """소스 성격에 따른 가산·감산(2026-08-07 신설).
+    공유마당·국가유산청은 '실물 작품·유물' 아카이브라 전통문화 주제에서 신뢰도가 높다.
+    반면 관광공사는 장소 검색이라, 제목이 '~박물관/~마을/~축제'처럼 장소를 가리키면
+    작품 자체가 아니므로 뒤로 보낸다(작품을 찾는데 간판 사진이 오는 것을 방지)."""
+    src = item.get("source", "")
+    title = (item.get("title", "") or "").lower()
+    if src in ("공유마당(공공누리)", "국가유산청"):
+        return 6                       # 실물 작품·유물 자료 — 우선
+    if src == "한국관광공사" and any(w in title for w in _PLACE_WORDS):
+        return -10                     # 작품이 아니라 장소·건물·행사
+    return 0
 
 
 def _augment_query(q: str) -> str:
@@ -599,14 +651,16 @@ def search_tourapi_award(query: str, key: str, n: int = 6) -> list:
 # 무관하게 "SERVICE KEY IS NOT REGISTERED ERROR"만 반환 — data.go.kr 활용신청 페이지의
 # 공식 End Point는 게이트웨이(apis.data.go.kr/B552546/ShrWrtgService)임을 확인하고 변경.
 # 데이터포맷이 XML로 고정(json 파라미터 무시됨)이라 XML로 파싱.
-# ⚠️ 응답 필드명은 문서로 100% 확정 못 함 — 추정치(_GONGU_FIELDS). 키 활성화(게이트웨이
-# 동기화) 후 실제 응답 1건을 같이 보면 5분 내 보강 가능.
+# 실제 API 응답으로 확정한 필드명(2026-08-07 실측). 예전엔 문서가 없어 추정치를 넣어뒀는데
+# 전부 빗나가서 이미지가 한 장도 안 나왔음(응답은 정상인데 파싱이 실패).
+#   limgpath=큰 이미지, simgpath=썸네일, writingName=제목, writingSeq=일련번호,
+#   authorNameKor=저자(한글). 라이선스 필드는 목록 응답에 없어 기본 표기를 쓴다.
 _GONGU_FIELDS = {
-    "title": ["WRT_NM", "TITLE", "wrtNm"],
-    "image": ["IMG_URL", "IMG_THUMB_URL", "DOWN_URL", "FILE_URL", "imgUrl", "imgThumbUrl"],
-    "id": ["WRT_SN", "SN", "wrtSn"],
+    "title": ["writingName", "WRT_NM", "TITLE"],
+    "image": ["limgpath", "simgpath", "IMG_URL", "FILE_URL"],
+    "id": ["writingSeq", "WRT_SN", "SN"],
     "license": ["FREE_USE_TYPE", "GONGU_MARK_NM", "OL_SORT_NM"],
-    "author": ["WRT_WRTR", "AUTHOR", "wrtWrtr"],
+    "author": ["authorNameKor", "authorNameChn", "WRT_WRTR"],
 }
 
 
@@ -616,9 +670,12 @@ def search_gongu(query: str, key: str, n: int = 6) -> list:
     if not key:
         return []
     base = "https://apis.data.go.kr/B552546/ShrWrtgService/getImgExpWrtgList"
+    # 검색 파라미터는 'writingName'(제목 부분일치). 예전에 쓰던 'cond[WRT_NM::LIKE]' 형식은
+    # 서버가 조용히 무시해 매번 전체 목록(15,802건)의 첫 페이지만 돌려줬다 — 검색어와 무관한
+    # 서예 작품이 나오던 원인(2026-08-07 실측으로 확정).
     qs = urllib.parse.urlencode({
         "serviceKey": key, "numOfRows": str(max(1, min(n + 4, 30))), "pageNo": "1",
-        "cond[WRT_NM::LIKE]": query,
+        "writingName": query,
     })
     try:
         root = ET.fromstring(_get(base + "?" + qs))
@@ -630,6 +687,10 @@ def search_gongu(query: str, key: str, n: int = 6) -> list:
         img = _pick(d, _GONGU_FIELDS["image"])
         if not img:
             continue
+        # API는 http:// 주소를 주는데 그 서버가 http를 거부(503)하고 https만 받는다 —
+        # 그대로 쓰면 다운로드가 전부 실패한다(2026-08-07 실측).
+        if img.startswith("http://"):
+            img = "https://" + img[len("http://"):]
         wid = _pick(d, _GONGU_FIELDS["id"])
         out.append({
             "url": img,
@@ -880,6 +941,12 @@ def find_images(query: str, n: int = 6, settings: dict = None,
     gk = (settings.get("gongu_key") or "").strip()
     if gk:
         _add(search_gongu(query, gk, pool))
+    # 유물 아카이브는 정식 명칭으로만 등록돼 있어 일상어('도자기','한복')로는 0건이 나온다.
+    # 정식 명칭(백자·청자·저고리 …)으로도 함께 조회해 실제 유물 사진을 확보한다.
+    for alt in archive_synonyms(query):
+        _add(search_heritage(alt, pool))
+        if gk:
+            _add(search_gongu(alt, gk, pool))
     _add(search_openverse(q, pool))
     _add(search_wikimedia(q, pool))
     _add(search_wikimedia_category(query, pool))  # 추상 개념어 주제 보강(카테고리 검색)
@@ -914,7 +981,12 @@ def find_images(query: str, n: int = 6, settings: dict = None,
     scored = [(_korea_score(r, query), i, r) for i, r in enumerate(results)]
     use = [t for t in scored
            if t[0] > 0 or (t[0] == 0 and t[2].get("source") not in _LOOSE_MATCH_SOURCES)]
-    use.sort(key=lambda t: (-t[0], t[1]))     # 점수 높은 순 → 원순서
+    # 소스 성격 가중치(2026-08-07): 관광공사(TourAPI)는 '장소 이름'에 검색어가 들어가면
+    # 무조건 반환해서, '민화'로 찾으면 민화박물관·민화마을·주민화합축제 같은 간판·건물
+    # 사진이, '한복'으로 찾으면 한복 대여점·시장 상가가 상위를 전부 차지했다. 정작 필요한
+    # '실제 민화 그림·한복 유물'(공유마당·국가유산청)은 뒤로 밀려 한 장도 안 들어갔음.
+    # → 실물 작품·유물 아카이브를 관광 장소보다 앞에 세운다.
+    use.sort(key=lambda t: (-(t[0] + _source_bonus(t[2], query)), t[1]))
     return [t[2] for t in use[:n]]
 
 
