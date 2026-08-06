@@ -92,7 +92,8 @@ def _korea_score(item: dict, query: str = "") -> int:
         if alt.lower() in text:
             score += 6
             break
-    if item.get("source") in ("한국관광공사", "국가유산청", "공유마당(공공누리)"):
+    if item.get("source") in ("한국관광공사", "한국관광공사 수상작",
+                              "국가유산청", "공유마당(공공누리)"):
         score += 8              # 한국 정부기관 자체 API — 동률 시 타이브레이커
     elif item.get("source") in ("Unsplash", "Pexels"):
         score += 3              # 고화질 스톡 사진 — 동률 시 약한 가산
@@ -138,6 +139,8 @@ def _source_bonus(item: dict, query: str = "") -> int:
     작품 자체가 아니므로 뒤로 보낸다(작품을 찾는데 간판 사진이 오는 것을 방지)."""
     src = item.get("source", "")
     title = (item.get("title", "") or "").lower()
+    if src == "한국관광공사 수상작":
+        return 7                       # 사진작가 관광공모전 수상작 — 화질·구도 최상
     if src in ("공유마당(공공누리)", "국가유산청"):
         return 6                       # 실물 작품·유물 자료 — 우선
     if src == "한국관광공사" and any(w in title for w in _PLACE_WORDS):
@@ -633,11 +636,21 @@ def search_tourapi_award(query: str, key: str, n: int = 6) -> list:
         if not img:
             continue
         nuri = (it.get("cpyrhtDivCd") or "").replace("Type", "")
+        # 제목은 한글 우선(2026-08-07): 예전엔 영어 제목을 앞에 뒀는데, 한글 검색어와
+        # 매칭이 안 돼('단풍' vs 'Autumn at Jujeongol') 점수를 못 받고 밀려났다.
+        # 한/영 둘 다 담아 어느 쪽 검색어로도 걸리게 한다.
+        ko_t = (it.get("koTitle") or "").strip()
+        en_t = (it.get("enTitle") or "").strip()
+        title = ko_t or en_t
+        if ko_t and en_t and ko_t != en_t:
+            title = f"{ko_t} ({en_t})"
         out.append({
             "url": img,
             "thumb": (it.get("thumbImage") or img).strip(),
-            "title": (it.get("enTitle") or it.get("koTitle") or "").strip(),
-            "source": "한국관광공사",
+            "title": title,
+            # 일반 관광지 사진(상호·건물)과 구분되는 고유 라벨 — 사진작가 수상작이라
+            # 품질이 높아 랭킹에서 우대한다(같은 '한국관광공사'로 묶으면 구분 불가).
+            "source": "한국관광공사 수상작",
             "source_page": "https://phoko.visitkorea.or.kr/",
             "license": f"공공누리 {nuri}유형" if nuri else "공공누리(출처 표기)",
             "creator": (it.get("enCmanNm") or it.get("koCmanNm") or "").strip(),
