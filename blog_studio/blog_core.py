@@ -2985,7 +2985,7 @@ def generate_post(date_str: str, topic: str, settings: dict, log=print,
     # 사진 없는 글이 그대로 발행되는 문제가 있었음(2026-07-07) — 여기서 자동 보강.
     if n_photos == 0 and not word_mode:
         try:
-            _autofill_found_images(cfg, settings, log)
+            _autofill_found_images(cfg, settings, date_str, log)
         except Exception as e:
             log(f"   ⚠️ 자동 이미지 검색 생략(사진 없이 발행됩니다): {e}")
 
@@ -3687,12 +3687,69 @@ def _place_by_section(body: str, items: list, lang: str) -> str:
     return "".join(out)
 
 
-def _autofill_found_images(cfg: dict, settings: dict, log=print) -> int:
+def _blog_display_name() -> str:
+    """현재 활성 블로그의 표시 이름(카드 상단 브랜드 라벨용). 못 찾으면 빈 문자열."""
+    try:
+        bid, _ = current_blog()
+        if bid:
+            reg = load_registry()
+            return (reg.get("blogs", {}).get(bid, {}).get("name") or "").strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _add_hero_card(cfg: dict, settings: dict, date_str: str = "", log=print) -> int:
+    """글 맨 위에 들어갈 대표 카드 이미지(HTML/CSS → 헤드리스 브라우저 캡처)를 만들어
+    library_photos_ko/en에 넣고 본문에 IMAGE_1 자리표시자를 심는다.
+    발행 시 publish_date가 이 파일들을 업로드해 IMAGE_1 자리에 채워 넣는다(단어 카드와 같은 통로).
+    반환: 만든 카드 수(0=실패). 실패해도 예외를 밖으로 내지 않는다(글 생성 자체는 항상 성공)."""
+    try:
+        import html_card
+    except Exception as e:
+        log(f"   ⚠️ 카드 모듈 없음 — 사진 없이 발행됩니다: {e}")
+        return 0
+    if not html_card.is_available():
+        log("   ⚠️ Playwright 미설치 — 카드 생성 건너뜀(사진 없이 발행됩니다).")
+        return 0
+    if not date_str:
+        return 0
+    out_dir = GENERATED_DIR / date_str
+    out_dir.mkdir(parents=True, exist_ok=True)
+    brand = _blog_display_name()
+    # 한/영 각각 한 장씩 — 카드엔 텍스트가 픽셀로 박히므로 언어별로 따로 만든다
+    # (한 장을 공유하면 영문 글에 한글 제목이 그대로 노출됨).
+    ko_title = (cfg.get("ko_title") or "").strip()
+    en_title = (cfg.get("en_title") or "").strip()
+    ko_sub = _truncate_at_sentence(cfg.get("summary_ko") or cfg.get("ko_meta") or "")
+    en_sub = _truncate_at_sentence(cfg.get("summary_en") or cfg.get("en_meta") or "")
+    card_ko = html_card.make_hero_card(
+        ko_title, str(out_dir / "_herocard_ko.png"), subtitle=ko_sub, brand=brand, log=log)
+    card_en = html_card.make_hero_card(
+        en_title or ko_title, str(out_dir / "_herocard_en.png"),
+        subtitle=en_sub, brand=brand, log=log)
+    if not (card_ko and card_en):
+        log("   ⚠️ 대표 카드 생성 실패 — 사진 없이 발행됩니다.")
+        return 0
+    # 본문 맨 앞에 IMAGE_1 자리표시자(이미 있으면 그대로 둠)
+    for key, alt in (("body_ko", ko_title), ("body_en", en_title or ko_title)):
+        body = cfg.get(key, "")
+        if "<!-- IMAGE_1 " not in body:
+            cfg[key] = f'<!-- IMAGE_1 alt="{(alt or "").replace(chr(34), chr(39))}" -->\n' + body
+    cfg["library_photos_ko"] = [card_ko]
+    cfg["library_photos_en"] = [card_en]
+    log(f"   🎴 대표 카드 이미지 생성(한/영): {ko_title[:28]}")
+    return 1
+
+
+def _autofill_found_images(cfg: dict, settings: dict, date_str: str = "", log=print) -> int:
     """사진이 전혀 없는 글(cfg, 아직 디스크에 저장 전)에 전체 1장 + 소주제별 1장을
     관광공사·공공데이터·무료 이미지 사이트에서 찾아 출처 캡션과 함께 넣는다.
     GUI의 '🖼 소주제별 이미지 자동 채우기'(insert_found_images_by_section)와 같은
     로직이지만, 그쪽은 이미 저장된 글을 디스크에서 다시 읽어와 처리하는 반면 이 함수는
-    generate_post() 안에서 저장 직전 cfg를 그 자리에서 바로 채운다(중복 디스크 I/O 방지)."""
+    generate_post() 안에서 저장 직전 cfg를 그 자리에서 바로 채운다(중복 디스크 I/O 방지).
+    ★검색으로 한 장도 못 찾으면 '사진 없이 발행' 대신 HTML 카드를 대표 이미지로 만든다
+    (2026-08-03) — 엉뚱한 사진을 억지로 넣지 않으면서 빈손으로 나가지도 않게."""
     import photo_plan as pplan
     import image_finder as imgf
     log("   🔎 사진이 없는 글 — 관광공사·공공데이터·무료 이미지에서 자동 검색합니다...")
@@ -3706,8 +3763,8 @@ def _autofill_found_images(cfg: dict, settings: dict, log=print) -> int:
         items.append(found[0] if found else None)
     placed = sum(1 for it in items if it)
     if not placed:
-        log("   ⚠️ 이 글에 맞는 무료 이미지를 찾지 못했습니다 — 사진 없이 발행됩니다.")
-        return 0
+        log("   ⚠️ 이 글에 맞는 무료 이미지를 찾지 못했습니다 — 대표 카드 이미지를 만듭니다.")
+        return _add_hero_card(cfg, settings, date_str, log)
     items = _dedupe_items(items, log)
     items = _translate_titles_ko(items, settings, log)
     items = rehost_found_images(items, log)
