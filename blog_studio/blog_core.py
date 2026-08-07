@@ -3162,10 +3162,37 @@ _VISUAL_Q_SYSTEM = ("당신은 사진 리서처입니다. 글에서 '실제로 �
                     "대상'을 뽑아 이미지 검색어를 만들어 지정한 JSON 하나만 출력하세요.")
 
 
+def _query_relevant(q: str, it: dict) -> bool:
+    """검색어와 결과 제목·태그의 토큰이 실제로 겹치는지. 느슨한 소스(관광공사·미술관 등)가
+    검색어와 무관한 걸 '그나마 비슷한 것'으로 돌려주는 걸 막는다 — 예: 'Korean dance'로
+    찾았는데 드가의 발레 그림·고갱의 타히티 성모화가 오던 문제(K-Dance 실제 사고).
+    한국어 소재명(ko)도 함께 넘기면 한글 제목과도 대조한다."""
+    title = " ".join([str(it.get("title") or ""), str(it.get("title_ko") or ""),
+                      str(it.get("tags") or "")]).lower()
+    # 색·형용사·일반동작처럼 아무 데나 흔한 말은 근거로 삼지 않는다 — 'white' 하나가 겹쳐
+    # 당나라 백마 그림('Night-Shining White')이 살풀이춤 사진으로 통과한 사고가 있었다.
+    stop = {"and", "the", "of", "with", "korean", "korea", "traditional", "dance", "photo",
+            "white", "black", "red", "blue", "green", "dark", "light", "bright", "night",
+            "close", "closeup", "detail", "view", "scene", "motion", "moving", "beautiful",
+            "performance", "performing", "stage", "floor", "wooden", "vintage", "modern"}
+    toks = [t for t in re.findall(r"[a-z]+", (q or "").lower())
+            if len(t) >= 4 and t not in stop]
+    ko_stop = {"하얀", "흰색", "검은", "붉은", "푸른", "모습", "장면", "동작", "사진",
+               "전통", "한국", "아름", "깊은", "위의", "속의"}
+    ko_toks = [t for t in re.findall(r"[가-힣]{2,}", q or "") if t not in ko_stop]
+    if not toks and not ko_toks:
+        return True
+    return (any(t[:5] in title for t in toks)          # 어간 비슷하면 인정(rings→ring)
+            or any(t in title for t in ko_toks))
+
+
 def _visual_queries_prompt(wko, wen, summary, body_text) -> str:
-    return f'''단어: "{wko}" ({wen})
-뜻: {summary}
-아래는 이 단어를 설명한 글의 본문입니다:
+    # 단어 글이면 '단어: 결 (Gyeol) / 뜻: …', 일반 글이면 '글 제목: …' 형식이 되도록
+    # 머리말만 분기(2026-08-07: 일반 글에도 이 추출기를 쓰게 되면서 필요해짐).
+    head = (f'단어: "{wko}" ({wen})\n뜻: {summary}' if wen
+            else f'글 제목: "{wko}"' + (f'\n요약: {summary}' if summary else ''))
+    return f'''{head}
+아래는 이 글의 본문입니다:
 ---
 {body_text[:2500]}
 ---
@@ -3185,7 +3212,9 @@ def _visual_queries_prompt(wko, wen, summary, body_text) -> str:
 def _visual_queries_for_word(cfg, settings, log=print) -> list:
     """단어 글 본문에서 '찍을 수 있는 구체적 소재'를 추출해 [{ko,search_en,korea}] 반환.
     실패 시 빈 리스트(호출부가 단어 자체 검색으로 폴백)."""
-    wko = (cfg.get("word_ko") or "").strip()
+    # 단어 글은 word_ko/word_en, 일반 글은 제목을 주제로 삼는다(일반 글에도 이 추출기를
+    # 쓰도록 2026-08-07 확장 — 촬영목록 검색어가 엉뚱한 그림을 불러오던 문제 해결).
+    wko = (cfg.get("word_ko") or cfg.get("ko_title") or cfg.get("topic") or "").strip()
     wen = (cfg.get("word_en") or "").strip()
     summary = (cfg.get("summary_ko") or cfg.get("ko_meta") or "").strip()
     body_text = re.sub(r"<[^>]+>", " ", cfg.get("body_ko") or "")
@@ -3773,18 +3802,51 @@ def _autofill_found_images(cfg: dict, settings: dict, date_str: str = "", log=pr
     import photo_plan as pplan
     import image_finder as imgf
     log("   🔎 사진이 없는 글 — 관광공사·공공데이터·무료 이미지에서 자동 검색합니다...")
-    shots = pplan.generate_shot_list(cfg, settings, log)
     used = _load_used_image_urls()
     items = []
-    for s in shots:
-        q = s.get("search_en") or s.get("heading") or cfg.get("en_title", "")
-        found = imgf.find_images(q, n=4, settings=settings)
-        found = [it for it in found if (it.get("url") or "").strip() not in used]
-        items.append(found[0] if found else None)
+
+    # ① 본문에서 '실제로 사진에 담을 수 있는 구체적 소재'를 뽑아 검색어로 쓴다(2026-08-07).
+    #    예전엔 촬영목록(generate_shot_list)의 search_en을 그대로 썼는데, 그건 '운영자가
+    #    직접 찍을 때의 분위기 컷' 가이드라 검색어로는 부적합했다 — '한국 무용 용어' 글에
+    #    'ballet shoes on wooden table', 'empty theater stage' 같은 검색어가 나와 드가의
+    #    발레 그림·고갱의 타히티 성모화가 본문에 실렸다(K-Dance 실제 사고).
+    subjects = _visual_queries_for_word(cfg, settings, log)
+    if subjects:
+        log("   🔎 본문 속 시각 소재로 검색: "
+            + ", ".join((s.get("ko") or s.get("search_en", ""))[:14] for s in subjects[:6]))
+        for s in subjects:
+            q = (s.get("search_en") or s.get("ko") or "").strip()
+            if not q:
+                continue
+            found = imgf.find_images(q, n=6, settings=settings,
+                                     korea_focus=bool(s.get("korea", True)))
+            # 검색어와 실제로 관련 있는 것만 — 관련 없으면 그 자리는 비운다(억지로 채우면
+            # 드가의 발레 그림 같은 무관한 이미지가 실린다). 부족분은 아래에서 카드로 보완.
+            kq = f"{q} {s.get('ko', '')}"
+            found = [it for it in found
+                     if (it.get("url") or "").strip() not in used
+                     and not _is_scenic_result(it)
+                     and _query_relevant(kq, it)]
+            items.append(found[0] if found else None)
+
+    # ② 소재 추출이 안 되면(본문이 없는 옛 글 등) 기존 촬영목록 방식으로 폴백
+    if not any(items):
+        items = []
+        shots = pplan.generate_shot_list(cfg, settings, log)
+        for s in shots:
+            q = s.get("search_en") or s.get("heading") or cfg.get("en_title", "")
+            found = imgf.find_images(q, n=4, settings=settings)
+            found = [it for it in found if (it.get("url") or "").strip() not in used]
+            items.append(found[0] if found else None)
     placed = sum(1 for it in items if it)
     if not placed:
         log("   ⚠️ 이 글에 맞는 무료 이미지를 찾지 못했습니다 — 대표 카드 이미지를 만듭니다.")
         return _add_hero_card(cfg, settings, date_str, log)
+    # 관련 사진이 히어로(0번) 자리에 없으면 대표 카드로 채운다(2026-08-07). 주제에 맞는
+    # 사진이 희소한 블로그(예: 한국 무용)에서 억지로 무관한 그림을 첫 화면에 놓지 않기 위함.
+    # ★카드는 _place_by_section 뒤에 넣어야 한다 — 그 함수가 IMAGE_ 자리표시자를 모두
+    #  지우므로, 먼저 넣으면 카드가 사라진다.
+    need_hero_card = not items[0]      # items[0]=None이면 히어로 자리를 카드가 맡는다
     items = _dedupe_items(items, log)
     items = _translate_titles_ko(items, settings, log)
     # _place_by_section은 슬롯 순서(0=히어로, 1..=소주제)에 의존하므로 개수 유지 필요
@@ -3796,6 +3858,12 @@ def _autofill_found_images(cfg: dict, settings: dict, date_str: str = "", log=pr
     cfg.setdefault("found_images", []).extend(recs)
     _record_used_image_urls([r["url"] for r in recs if r.get("url")])
     n = sum(1 for it in items if it)
+    # 대표 사진 자리가 비었으면 이제(배치가 끝난 뒤) 카드를 심는다 — _place_by_section이
+    # IMAGE_ 자리표시자를 지우므로 반드시 이 순서여야 한다.
+    if need_hero_card:
+        if _add_hero_card(cfg, settings, date_str, log):
+            log(f"   🎴 주제에 맞는 대표 사진이 없어 카드 이미지로 대체(본문 사진 {n}장은 유지)")
+            n += 1
     log(f"   ✅ 이미지 {n}장을 전체·소주제별로 자동 삽입했습니다(출처 포함).")
     return n
 
