@@ -51,7 +51,10 @@ _NEG_TOKENS = ("japan", "japanese", "china", "chinese", "vietnam", "thailand",
 
 # 매칭 안 돼도 '그나마 비슷한 것'을 항상 반환하는 느슨한 검색 소스.
 # 한국 신호가 전혀 없으면(중립 0점) 노이즈로 간주해 제외(find_images 참고).
-_LOOSE_MATCH_SOURCES = {"Art Institute of Chicago", "The Met"}
+# 검색어와 안 맞아도 '그나마 비슷한 것'을 항상 돌려주는 느슨한 소스 — 점수 0이면 노이즈로
+# 보고 제외한다(korea_focus 검색에서는 아예 조회하지 않지만, 만국 공통 소재 검색에서
+# 들어올 때를 위한 2차 방어).
+_LOOSE_MATCH_SOURCES = {"Art Institute of Chicago", "The Met", "Library of Congress"}
 
 
 # 검색어 키워드 매칭에서 신호로 안 쳐주는 범용 단어(따로 _KO_TOKENS로 가산되거나
@@ -966,13 +969,16 @@ def find_images(query: str, n: int = 6, settings: dict = None,
     wmk = (settings.get("wikimedia_token") or "").strip()
     if wmk:
         _add(search_wikimedia_api(q, wmk, pool))  # 공식 통합 API — 같은 Commons 자료 보강
-    _add(search_loc(q, pool))                   # 근현대 공공기록 사진(한국전쟁 등)에 강함
-    # ⚠️ Art Institute of Chicago(search_artic)는 검색 API는 열려 있지만 이미지 서버가
-    # 봇을 차단해 다운로드·핫링크가 모두 403이다(UA·Referer를 바꿔도 동일 — 2026-08-07
-    # 실측). 그래서 후보에 넣으면 재호스팅도 실패하고 원본 링크로 발행돼 독자에겐
-    # '깨진 이미지'만 남는다(K-Dance 8-07 글에서 실제 발생). 사용하지 않는다.
-    if len(results) < pool:
-        _add(search_met(q, pool))
+    # ⚠️ 서양 아카이브 3종은 '느슨한 검색'이라 검색어와 무관해도 그나마 비슷한 걸 항상
+    # 돌려준다 — 한국 주제 글에 드가의 발레 그림, 인도 승려 초상, Harper's weekly 잡지가
+    # 실린 사고가 반복됐다(K-Dance 9편). 한국 관련 검색(korea_focus)에서는 후보에서 뺀다.
+    #  · Art Institute of Chicago: 여기에 더해 이미지 서버가 봇을 차단(403)해 재호스팅도
+    #    불가능하므로 어떤 경우에도 쓰지 않는다(2026-08-07 실측).
+    #  · The Met / Library of Congress: 만국 공통 소재(korea_focus=False)에는 여전히 유용.
+    if not korea_focus:
+        _add(search_loc(q, pool))               # 근현대 공공기록 사진에 강함
+        if len(results) < pool:
+            _add(search_met(q, pool))
     pk = (settings.get("pexels_key") or "").strip()
     if pk:
         _add(search_pexels(q, pk, pool))
