@@ -3035,11 +3035,15 @@ def _download_for_rehost(url: str, dest_dir: Path, idx: int) -> Path:
     return path
 
 
-def rehost_found_images(items: list, log=print) -> list:
+def rehost_found_images(items: list, log=print, keep_len: bool = False) -> list:
     """find_images() 결과의 외부 URL을 내려받아 Blogger CDN(우리 글의 고유 이미지)으로
     업로드하고, 각 항목의 url을 그 CDN URL로 교체한 새 리스트를 반환합니다.
     (외부 사이트 핫링크 대신 자체 호스팅해야 구글이 '우리 글의 이미지'로 인식 — SEO 목적)
-    개별 다운로드/업로드 실패 항목은 원래 외부 URL을 그대로 둡니다(폴백)."""
+
+    재호스팅 실패 항목은 '버린다'(2026-08-07 변경). 예전엔 원본 외부 URL을 그대로 뒀는데,
+    그런 사이트는 대개 핫링크도 막아(artic.edu 403) 독자에겐 깨진 이미지만 보였다.
+    keep_len=True면 호출부가 인덱스로 짝을 맞추는 경우라 항목 수를 유지하고 url만 비운다
+    (빈 url은 호출부들이 이미 건너뛴다)."""
     import publish_today as pub
 
     targets = [(i, it) for i, it in enumerate(items) if it and (it.get("url") or "").strip()]
@@ -3055,8 +3059,9 @@ def rehost_found_images(items: list, log=print) -> list:
             except Exception as e:
                 log(f"   ⚠️ 이미지 다운로드 실패({it.get('source','')}): {e}")
         if not downloaded:
-            log("   ⚠️ 외부 이미지를 하나도 내려받지 못해 원본 링크를 그대로 사용합니다.")
-            return items
+            # 원본 링크를 그대로 쓰면 핫링크 차단 사이트에선 깨진 이미지가 되므로 전부 뺀다.
+            log("   ⚠️ 외부 이미지를 하나도 내려받지 못했습니다 — 사진 없이 진행합니다.")
+            return [dict(it, url="") for it in items] if keep_len else []
 
         log(f"   🌐 외부 이미지 {len(downloaded)}장을 블로그 CDN으로 재호스팅 중...")
         uploaded = pub.preload_photos(list(downloaded.values()))
@@ -3071,7 +3076,21 @@ def rehost_found_images(items: list, log=print) -> list:
                 new_it["url"] = cdn
                 out[i] = new_it
                 ok += 1
-        log(f"   ✅ 재호스팅 완료: {ok}/{len(downloaded)}장(실패분은 원본 링크 사용)")
+        # 재호스팅 못 한 항목(다운로드 실패 등)은 아예 버린다(2026-08-07). 예전엔 원본
+        # 외부 URL을 그대로 뒀는데, 그런 사이트는 대개 핫링크도 막아서(artic.edu 403)
+        # 독자 화면엔 '깨진 이미지'만 남았다 — 사진이 없는 편이 깨진 것보다 낫다.
+        _CDN = ("https://blogger.googleusercontent.com", "https://lh3.googleusercontent.com",
+                "https://1.bp.blogspot.com", "https://2.bp.blogspot.com",
+                "https://3.bp.blogspot.com", "https://4.bp.blogspot.com")
+        dropped = {i for i, _ in targets
+                   if not (out[i].get("url") or "").startswith(_CDN)}
+        if dropped:
+            log(f"   ⚠️ 재호스팅 실패 {len(dropped)}장 제외(외부 링크는 깨질 수 있어 사용 안 함)")
+            if keep_len:
+                out = [dict(it, url="") if i in dropped else it for i, it in enumerate(out)]
+            else:
+                out = [it for i, it in enumerate(out) if i not in dropped]
+        log(f"   ✅ 재호스팅 완료: {ok}/{len(downloaded)}장")
         return out
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -3507,7 +3526,8 @@ def _insert_context_photos_for_word_post(cfg: dict, settings: dict, log=print) -
         orig_urls = [items[i].get("url") for i in ext_idx]   # rehost 전 외부 원본 URL
         if ext_idx:
             ext_list = _translate_titles_ko([items[i] for i in ext_idx], settings, log)
-            ext_list = rehost_found_images(ext_list, log)
+            # 인덱스로 짝을 맞추므로 항목 수 유지 필요(실패분은 url이 비워져 아래서 걸러짐)
+            ext_list = rehost_found_images(ext_list, log, keep_len=True)
             for i, newit in zip(ext_idx, ext_list):
                 items[i] = newit
         for it in items:
@@ -3767,7 +3787,8 @@ def _autofill_found_images(cfg: dict, settings: dict, date_str: str = "", log=pr
         return _add_hero_card(cfg, settings, date_str, log)
     items = _dedupe_items(items, log)
     items = _translate_titles_ko(items, settings, log)
-    items = rehost_found_images(items, log)
+    # _place_by_section은 슬롯 순서(0=히어로, 1..=소주제)에 의존하므로 개수 유지 필요
+    items = rehost_found_images(items, log, keep_len=True)
     cfg["body_ko"] = _place_by_section(cfg.get("body_ko", ""), items, "ko")
     cfg["body_en"] = _place_by_section(cfg.get("body_en", ""), items, "en")
     recs = [{"url": it.get("url"), "source": it.get("source"), "license": it.get("license")}
@@ -3795,7 +3816,8 @@ def insert_found_images_by_section(date_str: str, items: list, settings: dict = 
     if not placed:
         return 0
     items = _translate_titles_ko(items, settings or {}, log)
-    items = rehost_found_images(items, log)
+    # _place_by_section은 슬롯 순서(0=히어로, 1..=소주제)에 의존하므로 개수 유지 필요
+    items = rehost_found_images(items, log, keep_len=True)
     cfg["body_ko"] = _place_by_section(cfg.get("body_ko", ""), items, "ko")
     cfg["body_en"] = _place_by_section(cfg.get("body_en", ""), items, "en")
     cfg.setdefault("found_images", []).extend(

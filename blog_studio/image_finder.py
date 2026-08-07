@@ -967,8 +967,10 @@ def find_images(query: str, n: int = 6, settings: dict = None,
     if wmk:
         _add(search_wikimedia_api(q, wmk, pool))  # 공식 통합 API — 같은 Commons 자료 보강
     _add(search_loc(q, pool))                   # 근현대 공공기록 사진(한국전쟁 등)에 강함
-    if len(results) < pool:                    # 미술품(민화·도자기·전통미술)에 강함
-        _add(search_artic(q, pool))
+    # ⚠️ Art Institute of Chicago(search_artic)는 검색 API는 열려 있지만 이미지 서버가
+    # 봇을 차단해 다운로드·핫링크가 모두 403이다(UA·Referer를 바꿔도 동일 — 2026-08-07
+    # 실측). 그래서 후보에 넣으면 재호스팅도 실패하고 원본 링크로 발행돼 독자에겐
+    # '깨진 이미지'만 남는다(K-Dance 8-07 글에서 실제 발생). 사용하지 않는다.
     if len(results) < pool:
         _add(search_met(q, pool))
     pk = (settings.get("pexels_key") or "").strip()
